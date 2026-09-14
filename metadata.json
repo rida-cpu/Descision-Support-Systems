@@ -1,0 +1,6 @@
+{
+  "name": "Insight_IQ - Data Profiling & Predictive Engine",
+  "description": "Interactive data profiling, visual analytics, predictive modeling engine with scenario simulation, and dataset history tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
