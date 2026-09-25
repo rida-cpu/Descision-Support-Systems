@@ -32,6 +32,8 @@ import { DatasetLoadingModal } from './components/DatasetLoadingModal';
 
 // Stage Pages: Visual & Custom charts are embedded inside DataProfilePage!
 // History is at the end of the sidebar!
+import { supabase } from './supabaseClient';
+
 import { UploadPage } from './pages/UploadPage';
 import { DataProfilePage } from './pages/DataProfilePage';
 import { PredictionPage } from './pages/PredictionPage';
@@ -89,61 +91,81 @@ const STAGE_TITLES: Record<AppPage, string> = {
 export default function App() {
   const [currentPage, setCurrentPage] = useState<AppPage>('upload');
 
-  // Authentication State
-  const [currentUser, setCurrentUser] = useState<UserProfile>(() => {
-    try {
-      const saved = localStorage.getItem('insightiq_user');
-      if (saved) return JSON.parse(saved);
-    } catch {
-      // ignore
-    }
+  // Authentication State — every visitor starts as a guest until they actually sign in/register.
+  const GUEST_USER: UserProfile = {
+    id: 'guest',
+    name: 'Guest User',
+    email: '',
+    role: 'Guest Analyst',
+    initials: 'GU',
+    avatarColor: 'bg-slate-500',
+    isLoggedIn: false
+  };
+
+  const [currentUser, setCurrentUser] = useState<UserProfile>(GUEST_USER);
+  const [isCheckingSession, setIsCheckingSession] = useState(true);
+
+  const profileFromSupabaseUser = (user: {
+    id: string;
+    email?: string | null;
+    user_metadata?: { full_name?: string };
+  }): UserProfile => {
+    const email = user.email || '';
+    const name =
+      user.user_metadata?.full_name ||
+      email
+        .split('@')[0]
+        .split(/[._-]/)
+        .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+        .join(' ') ||
+      'Analytics User';
+    const initials =
+      name
+        .split(' ')
+        .map((w) => w[0])
+        .join('')
+        .substring(0, 2)
+        .toUpperCase() || 'U';
+
     return {
-      id: 'usr_rida',
-      name: 'Rida Parveen',
-      email: 'ridaparveen116@gmail.com',
+      id: user.id,
+      name,
+      email,
       role: 'Student / Analyst',
-      initials: 'RP',
+      initials,
       avatarColor: 'bg-indigo-600',
       isLoggedIn: true
     };
-  });
+  };
+
+  // On load, check if this browser already has a real Supabase session (e.g. returning visitor),
+  // and keep currentUser in sync with Supabase for the whole lifetime of the tab.
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      if (data.session?.user) {
+        setCurrentUser(profileFromSupabaseUser(data.session.user));
+      }
+      setIsCheckingSession(false);
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.user) {
+        setCurrentUser(profileFromSupabaseUser(session.user));
+      } else {
+        setCurrentUser(GUEST_USER);
+      }
+    });
+
+    return () => {
+      listener.subscription.unsubscribe();
+    };
+  }, []);
 
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authModalMode, setAuthModalMode] = useState<AuthModalMode>('login');
 
-  // In-App Notifications State
-  const [notifications, setNotifications] = useState<AppNotification[]>([
-    {
-      id: 'notif-1',
-      title: 'Dataset Ingested',
-      message: 'sales_performance_q1_q4.csv parsed with 16 rows and 9 dimensions.',
-      time: '1m ago',
-      timestamp: Date.now() - 60000,
-      read: false,
-      type: 'success',
-      targetPage: 'profile'
-    },
-    {
-      id: 'notif-2',
-      title: 'ML Models Ready',
-      message: 'Random Forest and Gradient Boost models initialized with >95% confidence.',
-      time: '3m ago',
-      timestamp: Date.now() - 180000,
-      read: false,
-      type: 'info',
-      targetPage: 'prediction'
-    },
-    {
-      id: 'notif-3',
-      title: 'Data Health Score',
-      message: 'Dataset quality scored at 9.5/10 with 100% completeness rate.',
-      time: '8m ago',
-      timestamp: Date.now() - 480000,
-      read: true,
-      type: 'system',
-      targetPage: 'history'
-    }
-  ]);
+  // In-App Notifications State — starts empty; populated only as real actions occur (see addNotification calls)
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
 
   const addNotification = (
     title: string,
@@ -165,31 +187,14 @@ export default function App() {
   };
 
   const handleLogin = (user: UserProfile) => {
+    // Supabase already persists the real session itself; we just reflect it in UI state here.
     setCurrentUser(user);
-    try {
-      localStorage.setItem('insightiq_user', JSON.stringify(user));
-    } catch {
-      // ignore
-    }
     addNotification('Signed In Successfully', `Welcome back, ${user.name}!`, 'success');
   };
 
-  const handleLogout = () => {
-    const guest: UserProfile = {
-      id: 'guest',
-      name: 'Guest User',
-      email: '',
-      role: 'Guest Analyst',
-      initials: 'GU',
-      avatarColor: 'bg-slate-500',
-      isLoggedIn: false
-    };
-    setCurrentUser(guest);
-    try {
-      localStorage.removeItem('insightiq_user');
-    } catch {
-      // ignore
-    }
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    setCurrentUser(GUEST_USER);
     addNotification('Signed Out', 'You are now browsing in guest mode.', 'system');
   };
 
@@ -537,8 +542,71 @@ export default function App() {
     );
   };
 
+  // While we don't yet know if this browser has a valid Supabase session, show a blank loading state
+  // instead of flashing the gate card or the app.
+  if (isCheckingSession) {
+    return (
+      <div className="h-screen bg-slate-100 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-10 h-10 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
+          <span className="text-sm text-slate-500 font-medium">Loading Insight_IQ...</span>
+        </div>
+      </div>
+    );
+  }
+
+  // Gate: nothing about the app is shown until the visitor actually signs in or registers.
+  if (!currentUser.isLoggedIn) {
+    return (
+      <div className="h-screen bg-slate-100 flex items-center justify-center p-4">
+        <div className="w-full max-w-md bg-white rounded-2xl border border-slate-200 shadow-xl p-8 text-center">
+          <div className="w-14 h-14 mx-auto rounded-xl bg-indigo-600 text-white font-black flex items-center justify-center text-xl shadow-sm mb-5">
+            IQ
+          </div>
+          <h1 className="text-xl font-bold text-slate-900 mb-2">Welcome to Insight_IQ</h1>
+          <p className="text-sm text-slate-500 mb-6">
+            Sign in or create a free account to upload datasets, run predictions, and save your own history.
+          </p>
+          <div className="flex flex-col gap-2.5">
+            <button
+              type="button"
+              onClick={() => {
+                setAuthModalMode('login');
+                setIsAuthModalOpen(true);
+              }}
+              className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm rounded-lg shadow-xs transition-colors cursor-pointer"
+            >
+              Sign In
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAuthModalMode('register');
+                setIsAuthModalOpen(true);
+              }}
+              className="w-full py-2.5 px-4 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 font-bold text-sm rounded-lg transition-colors cursor-pointer"
+            >
+              Create Account
+            </button>
+          </div>
+        </div>
+
+        <AuthModal
+          isOpen={isAuthModalOpen}
+          onClose={() => setIsAuthModalOpen(false)}
+          onLogin={handleLogin}
+          currentUser={currentUser}
+          initialMode={authModalMode}
+          onPasswordChanged={(msg) => {
+            addNotification('Security Alert', msg, 'success');
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-slate-100 text-slate-900 font-sans flex flex-col antialiased">
+    <div className="h-screen bg-slate-100 text-slate-900 font-sans flex flex-col antialiased overflow-hidden print:h-auto print:overflow-visible">
       {/* 1. TOP NAVBAR (hidden when printing) */}
       <Navbar
         activePillar={activePillar.id}

@@ -16,6 +16,7 @@ import {
   Sparkles
 } from 'lucide-react';
 import { UserProfile, AuthModalMode } from '../types';
+import { supabase } from '../supabaseClient';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -45,9 +46,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   }, [isOpen, initialMode]);
 
   // Login form state
-  const [loginEmail, setLoginEmail] = useState('ridaparveen116@gmail.com');
-  const [loginPassword, setLoginPassword] = useState('password123');
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
   const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Register form state
   const [regName, setRegName] = useState('');
@@ -57,9 +59,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [showRegPassword, setShowRegPassword] = useState(false);
 
   // Forgot Password state
-  const [forgotEmail, setForgotEmail] = useState('ridaparveen116@gmail.com');
+  const [forgotEmail, setForgotEmail] = useState('');
   const [resetCodeSent, setResetCodeSent] = useState(false);
-  const [generatedCode, setGeneratedCode] = useState('');
   const [enteredCode, setEnteredCode] = useState('');
   const [newResetPassword, setNewResetPassword] = useState('');
   const [confirmResetPassword, setConfirmResetPassword] = useState('');
@@ -78,31 +79,41 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   if (!isOpen) return null;
 
-  const getStoredPassword = (email: string): string => {
-    try {
-      const stored = localStorage.getItem('insightiq_passwords');
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (parsed[email]) return parsed[email];
-      }
-    } catch {
-      // ignore
-    }
-    return 'password123';
+  // Builds a UserProfile from a real Supabase auth user
+  const profileFromSupabaseUser = (user: {
+    id: string;
+    email?: string | null;
+    user_metadata?: { full_name?: string };
+  }): UserProfile => {
+    const email = user.email || '';
+    const name =
+      user.user_metadata?.full_name ||
+      email
+        .split('@')[0]
+        .split(/[._-]/)
+        .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+        .join(' ') ||
+      'Analytics User';
+    const initials =
+      name
+        .split(' ')
+        .map((w) => w[0])
+        .join('')
+        .substring(0, 2)
+        .toUpperCase() || 'U';
+
+    return {
+      id: user.id,
+      name,
+      email,
+      role: 'Student / Analyst',
+      initials,
+      avatarColor: 'bg-indigo-600',
+      isLoggedIn: true
+    };
   };
 
-  const saveStoredPassword = (email: string, pass: string) => {
-    try {
-      const stored = localStorage.getItem('insightiq_passwords');
-      const parsed = stored ? JSON.parse(stored) : {};
-      parsed[email] = pass;
-      localStorage.setItem('insightiq_passwords', JSON.stringify(parsed));
-    } catch {
-      // ignore
-    }
-  };
-
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     if (!loginEmail.trim() || !loginPassword.trim()) {
@@ -110,40 +121,27 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
-    const expectedPass = getStoredPassword(loginEmail.trim());
-    if (loginPassword !== expectedPass && loginPassword !== 'password123') {
-      setError('Incorrect password. If you forgot your password, click "Forgot password?" below.');
+    setIsSubmitting(true);
+    const { data, error: authError } = await supabase.auth.signInWithPassword({
+      email: loginEmail.trim(),
+      password: loginPassword
+    });
+    setIsSubmitting(false);
+
+    if (authError || !data.user) {
+      setError(authError?.message || 'Incorrect email or password.');
       return;
     }
 
-    const parts = loginEmail.split('@')[0].split(/[._-]/);
-    const displayName = parts.map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join(' ') || 'Analytics User';
-    const initials = displayName
-      .split(' ')
-      .map((w) => w[0])
-      .join('')
-      .substring(0, 2)
-      .toUpperCase();
-
-    const loggedUser: UserProfile = {
-      id: `user-${Date.now()}`,
-      name: displayName,
-      email: loginEmail.trim(),
-      role: 'Student / Analyst',
-      initials: initials || 'RP',
-      avatarColor: 'bg-indigo-600',
-      isLoggedIn: true
-    };
-
     setSuccess('Signed in successfully! Loading your workspace...');
     setTimeout(() => {
-      onLogin(loggedUser);
+      onLogin(profileFromSupabaseUser(data.user));
       onClose();
       setSuccess(null);
     }, 400);
   };
 
-  const handleRegisterSubmit = (e: React.FormEvent) => {
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
@@ -162,58 +160,66 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
-    saveStoredPassword(regEmail.trim(), regPassword);
-
-    const initials = regName
-      .trim()
-      .split(' ')
-      .map((w) => w[0])
-      .join('')
-      .substring(0, 2)
-      .toUpperCase();
-
-    const newUser: UserProfile = {
-      id: `user-${Date.now()}`,
-      name: regName.trim(),
+    setIsSubmitting(true);
+    const { data, error: authError } = await supabase.auth.signUp({
       email: regEmail.trim(),
-      role: 'Student / Analyst',
-      initials: initials || 'ST',
-      avatarColor: 'bg-indigo-600',
-      isLoggedIn: true
-    };
+      password: regPassword,
+      options: {
+        data: { full_name: regName.trim() }
+      }
+    });
+    setIsSubmitting(false);
+
+    if (authError) {
+      setError(authError.message);
+      return;
+    }
+
+    // If "Confirm email" is ON in Supabase, data.session will be null here —
+    // the user must click the link in their inbox before they can sign in.
+    if (!data.session) {
+      setSuccess('Account created! Please check your email to confirm your account, then sign in.');
+      setTimeout(() => {
+        setTab('login');
+        setSuccess(null);
+      }, 2500);
+      return;
+    }
 
     setSuccess('Account created successfully! Welcome to InsightIQ.');
     setTimeout(() => {
-      onLogin(newUser);
+      if (data.user) onLogin(profileFromSupabaseUser(data.user));
       onClose();
       setSuccess(null);
     }, 400);
   };
 
-  const handleSendResetCode = () => {
+  const handleSendResetCode = async () => {
     setError(null);
     if (!forgotEmail.trim() || !forgotEmail.includes('@')) {
       setError('Please enter a valid email address.');
       return;
     }
 
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    setGeneratedCode(code);
+    setIsSubmitting(true);
+    const { error: authError } = await supabase.auth.resetPasswordForEmail(forgotEmail.trim());
+    setIsSubmitting(false);
+
+    if (authError) {
+      setError(authError.message);
+      return;
+    }
+
     setResetCodeSent(true);
-    setSuccess(`A 6-digit recovery code has been generated. Enter it below to set your new password.`);
+    setSuccess('A recovery code has been emailed to you. Enter it below along with your new password.');
   };
 
-  const handleResetPasswordSubmit = (e: React.FormEvent) => {
+  const handleResetPasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
     if (!enteredCode.trim()) {
-      setError('Please enter the 6-digit verification code.');
-      return;
-    }
-
-    if (enteredCode.trim() !== generatedCode) {
-      setError('The code does not match. Please click "Auto-fill Code" to use the generated code.');
+      setError('Please enter the verification code from your email.');
       return;
     }
 
@@ -227,9 +233,30 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
-    saveStoredPassword(forgotEmail.trim(), newResetPassword);
+    setIsSubmitting(true);
+    // Verifying the emailed OTP signs the user into a temporary recovery session.
+    const { error: verifyError } = await supabase.auth.verifyOtp({
+      email: forgotEmail.trim(),
+      token: enteredCode.trim(),
+      type: 'recovery'
+    });
+
+    if (verifyError) {
+      setIsSubmitting(false);
+      setError(verifyError.message);
+      return;
+    }
+
+    const { error: updateError } = await supabase.auth.updateUser({ password: newResetPassword });
+    setIsSubmitting(false);
+
+    if (updateError) {
+      setError(updateError.message);
+      return;
+    }
+
     setLoginEmail(forgotEmail.trim());
-    setLoginPassword(newResetPassword);
+    setLoginPassword('');
 
     setSuccess('Password updated successfully! You can now sign in.');
     onPasswordChanged?.(`Password for ${forgotEmail.trim()} was updated.`);
@@ -243,15 +270,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }, 1200);
   };
 
-  const handleChangePasswordSubmit = (e: React.FormEvent) => {
+  const handleChangePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
     const userEmail = currentUser?.email || loginEmail;
-    const currentStored = getStoredPassword(userEmail);
-
-    if (currentPassword !== currentStored && currentPassword !== 'password123') {
-      setError('Current password is not correct. Please try again.');
+    if (!userEmail) {
+      setError('You need to be signed in to change your password.');
       return;
     }
 
@@ -270,8 +295,27 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
-    saveStoredPassword(userEmail, newPassword);
-    setLoginPassword(newPassword);
+    setIsSubmitting(true);
+
+    // Re-verify the current password is correct before allowing the change.
+    const { error: verifyError } = await supabase.auth.signInWithPassword({
+      email: userEmail,
+      password: currentPassword
+    });
+
+    if (verifyError) {
+      setIsSubmitting(false);
+      setError('Current password is not correct. Please try again.');
+      return;
+    }
+
+    const { error: updateError } = await supabase.auth.updateUser({ password: newPassword });
+    setIsSubmitting(false);
+
+    if (updateError) {
+      setError(updateError.message);
+      return;
+    }
 
     setSuccess('Password changed successfully!');
     onPasswordChanged?.('Your account password was updated successfully.');
@@ -283,26 +327,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setNewPassword('');
       setConfirmNewPassword('');
     }, 1000);
-  };
-
-  const setDemoAccount = (name: string, email: string) => {
-    const initials = name
-      .split(' ')
-      .map((w) => w[0])
-      .join('')
-      .substring(0, 2)
-      .toUpperCase();
-    const demo: UserProfile = {
-      id: `demo-${Date.now()}`,
-      name,
-      email,
-      role: 'Student / Analyst',
-      initials,
-      avatarColor: 'bg-indigo-600',
-      isLoggedIn: true
-    };
-    onLogin(demo);
-    onClose();
   };
 
   return (
@@ -471,10 +495,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
               <button
                 type="submit"
-                className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-lg shadow-xs transition-colors cursor-pointer flex items-center justify-center gap-2"
+                disabled={isSubmitting}
+                className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-bold text-xs rounded-lg shadow-xs transition-colors cursor-pointer flex items-center justify-center gap-2"
               >
                 <LogIn size={14} />
-                <span>Sign In</span>
+                <span>{isSubmitting ? 'Signing in...' : 'Sign In'}</span>
               </button>
             </form>
           )}
@@ -564,10 +589,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
               <button
                 type="submit"
-                className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-lg shadow-xs transition-colors cursor-pointer flex items-center justify-center gap-2 mt-2"
+                disabled={isSubmitting}
+                className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-bold text-xs rounded-lg shadow-xs transition-colors cursor-pointer flex items-center justify-center gap-2 mt-2"
               >
                 <UserPlus size={14} />
-                <span>Create Account &amp; Start Predicting</span>
+                <span>{isSubmitting ? 'Creating account...' : 'Create Account & Start Predicting'}</span>
               </button>
             </form>
           )}
@@ -613,27 +639,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               </div>
 
               {resetCodeSent && (
-                <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-xl text-xs text-indigo-900 space-y-2 animate-fadeIn">
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-[13px] uppercase tracking-wider text-indigo-700">
-                      Recovery Code:
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setEnteredCode(generatedCode)}
-                      className="text-[13px] font-bold text-indigo-600 hover:text-indigo-800 underline cursor-pointer"
-                    >
-                      Auto-fill Code
-                    </button>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-base font-bold tracking-widest text-indigo-900 bg-white px-3 py-1 rounded-md border border-indigo-200">
-                      {generatedCode}
-                    </span>
-                    <span className="text-[13px] text-indigo-600">
-                      (Verification code)
-                    </span>
-                  </div>
+                <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-xl text-xs text-indigo-900 animate-fadeIn">
+                  <span className="font-semibold">Check your inbox.</span> We sent a code to{' '}
+                  <span className="font-mono">{forgotEmail.trim()}</span>. Enter it below with your new password.
                 </div>
               )}
 
@@ -742,7 +750,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     required
                     value={currentPassword}
                     onChange={(e) => setCurrentPassword(e.target.value)}
-                    placeholder="Enter current password (default: password123)"
+                    placeholder="Enter your current password"
                     className="w-full pl-9 pr-10 py-2 text-xs rounded-lg border border-slate-300 focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 focus:outline-none"
                   />
                   <button
@@ -815,33 +823,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </form>
           )}
 
-          {/* Quick Demo Sign In */}
-          {(tab === 'login' || tab === 'register') && (
-            <div className="pt-3 border-t border-slate-100">
-              <p className="text-[13px] font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                Or Instant One-Click Sign In:
-              </p>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setDemoAccount('Rida Parveen', 'ridaparveen116@gmail.com')}
-                  className="p-2.5 bg-slate-50 hover:bg-indigo-50 border border-slate-200 hover:border-indigo-200 rounded-lg text-left transition-colors cursor-pointer"
-                >
-                  <div className="font-semibold text-xs text-slate-800">Rida Parveen</div>
-                  <div className="text-[12px] text-slate-500">Student / Analyst</div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setDemoAccount('Alex Mercer', 'alex.mercer@company.io')}
-                  className="p-2.5 bg-slate-50 hover:bg-indigo-50 border border-slate-200 hover:border-indigo-200 rounded-lg text-left transition-colors cursor-pointer"
-                >
-                  <div className="font-semibold text-xs text-slate-800">Alex Mercer</div>
-                  <div className="text-[12px] text-slate-500">Learner / Researcher</div>
-                </button>
-              </div>
-            </div>
-          )}
         </div>
       </div>
     </div>

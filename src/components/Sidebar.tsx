@@ -80,7 +80,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   };
 
   return (
-    <aside className="w-72 border-r border-slate-800 bg-slate-900 flex flex-col min-h-[calc(100vh-4.5rem)] h-full shrink-0 select-none print:hidden">
+    <aside className="w-72 border-r border-slate-800 bg-slate-900 flex flex-col h-full shrink-0 select-none print:hidden">
       {/* Brand Header: Logo mark only since full name is displayed in Navbar */}
       <div className="px-5 py-5 border-b border-slate-800 flex items-center justify-between">
         <button
