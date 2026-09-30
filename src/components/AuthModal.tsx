@@ -150,6 +150,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
+    if (!/^[A-Za-z\s]+$/.test(regName.trim())) {
+      setError('Name should only contain letters — numbers are not allowed.');
+      return;
+    }
+
     if (regPassword.length < 6) {
       setError('Password must have at least 6 characters.');
       return;
@@ -522,7 +527,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     type="text"
                     required
                     value={regName}
-                    onChange={(e) => setRegName(e.target.value)}
+                    onChange={(e) => setRegName(e.target.value.replace(/[0-9]/g, ''))}
                     placeholder="e.g. Rida Parveen"
                     className="w-full pl-9 pr-3 py-2 text-xs rounded-lg border border-slate-300 focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 focus:outline-none"
                   />
