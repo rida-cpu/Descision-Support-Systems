@@ -8,7 +8,7 @@ import {
 import { PagePurposeBanner } from '../components/PagePurposeBanner';
 import { CollapsibleSection } from '../components/CollapsibleSection';
 import { ChartPrintModal, ChartPrintPackage } from '../components/ChartPrintModal';
-import { CorrelationFactor, DatasetRow, PredictionResultData } from '../types';
+import { ColumnProfile, CorrelationFactor, DatasetRow, PredictionResultData } from '../types';
 import { formatNumber } from '../utils/dataAnalysis';
 
 interface ReportsPageProps {
@@ -16,6 +16,7 @@ interface ReportsPageProps {
   rows: DatasetRow[];
   nums: string[];
   cats: string[];
+  columnProfiles: ColumnProfile[];
   targetKey: string;
   targetAverage: number;
   targetStd: number;
@@ -31,6 +32,7 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
   rows,
   nums,
   cats,
+  columnProfiles,
   targetKey,
   targetAverage,
   targetStd,
@@ -208,10 +210,57 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
             </div>
           </div>
 
-          {/* Section 2: Target & Forecast Summary */}
+          {/* Section 2: Full Column-Level Data Profiling */}
           <div className="report-section space-y-3">
             <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
-              2. Target Variable &amp; Model Forecast Analysis
+              2. Dataset Column Profiling
+            </h4>
+            <div className="overflow-x-auto rounded-xl border border-slate-200/70">
+              <table className="w-full text-[12px] border-collapse">
+                <thead>
+                  <tr className="bg-slate-50 text-left text-slate-500 font-semibold uppercase text-[11px]">
+                    <th className="px-3 py-2 border-b border-slate-200">Column</th>
+                    <th className="px-3 py-2 border-b border-slate-200">Type</th>
+                    <th className="px-3 py-2 border-b border-slate-200">Missing</th>
+                    <th className="px-3 py-2 border-b border-slate-200">Unique</th>
+                    <th className="px-3 py-2 border-b border-slate-200">Mean</th>
+                    <th className="px-3 py-2 border-b border-slate-200">Std Dev</th>
+                    <th className="px-3 py-2 border-b border-slate-200">Min</th>
+                    <th className="px-3 py-2 border-b border-slate-200">Max</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {columnProfiles.map((col) => (
+                    <tr key={col.name} className="border-b border-slate-100 last:border-b-0">
+                      <td className="px-3 py-1.5 font-semibold text-slate-800">{col.name}</td>
+                      <td className="px-3 py-1.5 text-slate-500">
+                        {col.isNumeric ? 'Numeric' : 'Categorical'}
+                      </td>
+                      <td className="px-3 py-1.5 text-slate-500 font-mono">{col.missing}</td>
+                      <td className="px-3 py-1.5 text-slate-500 font-mono">{col.unique}</td>
+                      <td className="px-3 py-1.5 text-slate-500 font-mono">
+                        {col.isNumeric ? formatNumber(col.mean) : '—'}
+                      </td>
+                      <td className="px-3 py-1.5 text-slate-500 font-mono">
+                        {col.isNumeric ? formatNumber(col.std) : '—'}
+                      </td>
+                      <td className="px-3 py-1.5 text-slate-500 font-mono">
+                        {col.isNumeric ? formatNumber(col.min) : '—'}
+                      </td>
+                      <td className="px-3 py-1.5 text-slate-500 font-mono">
+                        {col.isNumeric ? formatNumber(col.max) : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Section 3: Target & Forecast Summary */}
+          <div className="report-section space-y-3">
+            <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
+              3. Target Variable &amp; Model Forecast Analysis
             </h4>
             <div className="grid md:grid-cols-3 gap-4">
               <div className="report-card p-4 rounded-xl bg-slate-50 border border-slate-200/70">
@@ -224,31 +273,42 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
 
               <div className="report-card p-4 rounded-xl bg-slate-50 border border-slate-200/70">
                 <span className="text-xs text-slate-500 font-medium">Latest Model Forecast</span>
-                <div className="text-base font-bold text-indigo-700 mt-0.5 font-mono">
-                  {latestPrediction ? formatNumber(latestPrediction.value) : formatNumber(targetAverage)}
-                </div>
-                <p className="text-[13px] text-slate-500 mt-1">
-                  {latestPrediction ? latestPrediction.direction : 'Baseline Mean'}
-                </p>
+                {latestPrediction ? (
+                  <>
+                    <div className="text-base font-bold text-indigo-700 mt-0.5 font-mono">
+                      {formatNumber(latestPrediction.value)}
+                    </div>
+                    <p className="text-[13px] text-slate-500 mt-1">{latestPrediction.direction}</p>
+                  </>
+                ) : (
+                  <p className="text-[13px] text-amber-700 mt-1.5 leading-snug">
+                    No prediction has been run yet. Go to the Predictive Engine and click "Run Prediction" to see a forecast here.
+                  </p>
+                )}
               </div>
 
               <div className="report-card p-4 rounded-xl bg-slate-50 border border-slate-200/70">
                 <span className="text-xs text-slate-500 font-medium">Risk Signal Classification</span>
-                <div className="text-base font-bold text-emerald-700 mt-0.5">
-                  {latestPrediction?.risk || 'Low'} Risk
-                </div>
-                <p className="text-[13px] text-slate-500 mt-1">
-                  Within typical statistical control limits
-                </p>
+                {latestPrediction ? (
+                  <>
+                    <div className="text-base font-bold text-emerald-700 mt-0.5">{latestPrediction.risk} Risk</div>
+                    <p className="text-[13px] text-slate-500 mt-1">Within typical statistical control limits</p>
+                  </>
+                ) : (
+                  <p className="text-[13px] text-amber-700 mt-1.5 leading-snug">
+                    Run a prediction first to calculate a risk classification.
+                  </p>
+                )}
               </div>
             </div>
           </div>
 
-          {/* Section 3: Key Sensitivity Drivers */}
+          {/* Section 4: Key Sensitivity Drivers — visual bar chart */}
           <div className="report-section space-y-3">
             <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
-              3. Influential Statistical Drivers
+              4. Influential Statistical Drivers
             </h4>
+
             <div className="report-card p-4 rounded-xl bg-slate-50 border border-slate-200/70 space-y-2 text-xs">
               <div className="flex items-center justify-between">
                 <span>Top Positive Influence:</span>
@@ -261,6 +321,43 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
                 <span className="font-bold text-rose-700 font-mono">
                   {topNegFactor ? `${topNegFactor.name} (${topNegFactor.correlation.toFixed(2)})` : 'None'}
                 </span>
+              </div>
+            </div>
+
+            {/* Correlation bar chart — plain CSS widths, so it renders identically on screen and on paper */}
+            <div className="report-card p-4 rounded-xl bg-white border border-slate-200/70 space-y-2.5">
+              <span className="text-[12px] font-semibold text-slate-500 uppercase tracking-wide">
+                Correlation Strength vs. {targetKey || 'Target'}
+              </span>
+              <div className="space-y-2 pt-1">
+                {factors.slice(0, 8).map((f) => {
+                  const isPositive = f.correlation >= 0;
+                  const widthPct = Math.min(100, Math.abs(f.correlation) * 100);
+                  return (
+                    <div key={f.name} className="flex items-center gap-2 text-[12px]">
+                      <span className="w-28 shrink-0 truncate font-medium text-slate-700" title={f.name}>
+                        {f.name}
+                      </span>
+                      <div className="flex-1 h-3 rounded-full bg-slate-100 overflow-hidden">
+                        <div
+                          className={`h-full rounded-full ${isPositive ? 'bg-emerald-500' : 'bg-rose-500'}`}
+                          style={{ width: `${widthPct}%` }}
+                        />
+                      </div>
+                      <span
+                        className={`w-14 shrink-0 text-right font-mono font-semibold ${
+                          isPositive ? 'text-emerald-700' : 'text-rose-700'
+                        }`}
+                      >
+                        {isPositive ? '+' : ''}
+                        {f.correlation.toFixed(2)}
+                      </span>
+                    </div>
+                  );
+                })}
+                {!factors.length && (
+                  <p className="text-[12px] text-slate-400">No numeric predictor columns found in this dataset.</p>
+                )}
               </div>
             </div>
           </div>
