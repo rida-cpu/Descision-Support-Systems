@@ -85,6 +85,23 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Print-only rules: keep every card/section intact across page breaks, and give clean page margins.
+          (Browser "Headers and footers" — the date/URL/title shown at the top of each printed page — is a
+          browser print-dialog setting, not something a webpage can turn off. In the print dialog, open
+          "More settings" and switch "Headers and footers" OFF, and set Layout to "Portrait" for a cleaner report.) */}
+      <style>{`
+        @media print {
+          @page {
+            margin: 14mm 12mm;
+          }
+          .report-section,
+          .report-card {
+            break-inside: avoid;
+            page-break-inside: avoid;
+          }
+        }
+      `}</style>
+
       {/* 1. PURPOSE BANNER */}
       <PagePurposeBanner
         pageTitle="Executive Reports"
@@ -142,7 +159,7 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
         {/* Printable Report Document Card */}
         <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-8 space-y-8 print:border-none print:shadow-none print:p-0">
           {/* Header */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-6">
+          <div className="report-card flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-6">
             <div>
               <span className="text-xs font-bold text-indigo-600 uppercase tracking-widest">
                 Executive Briefing Document
@@ -164,27 +181,27 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
           </div>
 
           {/* Section 1: Overview Scorecard */}
-          <div className="space-y-3">
+          <div className="report-section space-y-3">
             <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
               1. Dataset Dimensions &amp; Quality Audit
             </h4>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="report-card p-3.5 rounded-xl bg-slate-50 border border-slate-200/70">
                 <span className="text-[12px] text-slate-500 font-semibold uppercase">Total Observations</span>
                 <div className="text-lg font-bold text-slate-900">{rows.length.toLocaleString()}</div>
               </div>
 
-              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="report-card p-3.5 rounded-xl bg-slate-50 border border-slate-200/70">
                 <span className="text-[12px] text-slate-500 font-semibold uppercase">Numeric Features</span>
                 <div className="text-lg font-bold text-indigo-700">{nums.length}</div>
               </div>
 
-              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="report-card p-3.5 rounded-xl bg-slate-50 border border-slate-200/70">
                 <span className="text-[12px] text-slate-500 font-semibold uppercase">Completeness</span>
                 <div className="text-lg font-bold text-emerald-600">{dataCompleteness}%</div>
               </div>
 
-              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="report-card p-3.5 rounded-xl bg-slate-50 border border-slate-200/70">
                 <span className="text-[12px] text-slate-500 font-semibold uppercase">Usability Rating</span>
                 <div className="text-lg font-bold text-slate-900">{usabilityScore}/10</div>
               </div>
@@ -192,12 +209,12 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
           </div>
 
           {/* Section 2: Target & Forecast Summary */}
-          <div className="space-y-3">
+          <div className="report-section space-y-3">
             <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
               2. Target Variable &amp; Model Forecast Analysis
             </h4>
             <div className="grid md:grid-cols-3 gap-4">
-              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="report-card p-4 rounded-xl bg-slate-50 border border-slate-200/70">
                 <span className="text-xs text-slate-500 font-medium">Selected Target Variable</span>
                 <div className="text-base font-bold text-slate-900 mt-0.5">{targetKey || 'None'}</div>
                 <p className="text-[13px] text-slate-500 mt-1">
@@ -205,7 +222,7 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
                 </p>
               </div>
 
-              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="report-card p-4 rounded-xl bg-slate-50 border border-slate-200/70">
                 <span className="text-xs text-slate-500 font-medium">Latest Model Forecast</span>
                 <div className="text-base font-bold text-indigo-700 mt-0.5 font-mono">
                   {latestPrediction ? formatNumber(latestPrediction.value) : formatNumber(targetAverage)}
@@ -215,7 +232,7 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
                 </p>
               </div>
 
-              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="report-card p-4 rounded-xl bg-slate-50 border border-slate-200/70">
                 <span className="text-xs text-slate-500 font-medium">Risk Signal Classification</span>
                 <div className="text-base font-bold text-emerald-700 mt-0.5">
                   {latestPrediction?.risk || 'Low'} Risk
@@ -228,11 +245,11 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
           </div>
 
           {/* Section 3: Key Sensitivity Drivers */}
-          <div className="space-y-3">
+          <div className="report-section space-y-3">
             <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
               3. Influential Statistical Drivers
             </h4>
-            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/70 space-y-2 text-xs">
+            <div className="report-card p-4 rounded-xl bg-slate-50 border border-slate-200/70 space-y-2 text-xs">
               <div className="flex items-center justify-between">
                 <span>Top Positive Influence:</span>
                 <span className="font-bold text-emerald-700 font-mono">
@@ -249,11 +266,11 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
           </div>
 
           {/* Footer & Return button */}
-          <div className="pt-4 border-t border-slate-200 flex items-center justify-between text-xs">
+          <div className="report-card pt-4 border-t border-slate-200 flex items-center justify-between text-xs">
             <button
               type="button"
               onClick={onNavigateToUpload}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 font-medium transition-colors cursor-pointer"
+              className="print:hidden inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 font-medium transition-colors cursor-pointer"
             >
               <ArrowLeft size={13} />
               Return to Upload Stage
