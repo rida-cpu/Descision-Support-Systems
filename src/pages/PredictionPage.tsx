@@ -13,8 +13,7 @@ import {
   Cpu,
   Layers,
   Check,
-  Sliders,
-  AlertTriangle
+  Sliders
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -41,8 +40,7 @@ import {
 import {
   formatNumber,
   computeAlgorithmPredictions,
-  generatePredictionCurve,
-  isLikelyIdentifierColumn
+  generatePredictionCurve
 } from '../utils/dataAnalysis';
 
 interface PredictionPageProps {
@@ -103,7 +101,7 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
   }, [resetSignal]);
 
   // FIX 1: Auto-run prediction when page opens / target changes and no result exists yet.
-  // Pehle prediction run nahi hoti thi, to baseVal = targetAverage ban jata tha.
+  // Without this, baseVal falls back to targetAverage when no prediction exists yet.
   React.useEffect(() => {
     if (!predictionResult && !predictionLoading) {
       onRunPrediction();
@@ -141,12 +139,6 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
     return map;
   }, [rows, availableFeatures]);
 
-  // Target like Pin code / ID is a label, not a quantity: forecasting it is meaningless
-  const targetIsIdentifier = useMemo(
-    () => isLikelyIdentifierColumn(targetKey, rows),
-    [targetKey, rows]
-  );
-
   // Multi-algorithm predictions
   const algorithmModels = useMemo(() => {
     return computeAlgorithmPredictions(
@@ -170,13 +162,6 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
   // FIX 3: Detect when consensus equals the baseline (inputs at averages)
   const tolerance = Math.max(1e-9, targetStd * 0.01);
   const isAtBaseline = Math.abs(consensusVal - targetAverage) <= tolerance;
-
-  // FIX 4: Detect the suspicious case where all models output exactly the same number
-  const allModelsIdentical = useMemo(() => {
-    if (algorithmModels.length < 2) return false;
-    const first = algorithmModels[0].predictedValue;
-    return algorithmModels.every((m) => Math.abs(m.predictedValue - first) <= 1e-6);
-  }, [algorithmModels]);
 
   // Best algorithm by R²
   const bestAlgorithm = useMemo(() => {
@@ -377,38 +362,6 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
             </div>
           </div>
         </div>
-
-        {targetIsIdentifier && (
-          <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900">
-            <AlertTriangle size={15} className="shrink-0 mt-0.5" />
-            <span>
-              <b>{targetKey}</b> ek ID / label column lagta hai (jaise Pin code), quantity nahi. Isko forecast
-              karna meaningless hai. Upar dropdown se koi asli numeric target chuno (jaise Sales, Amount, Profit).
-            </span>
-          </div>
-        )}
-
-        {weakFit && !targetIsIdentifier && (
-          <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900">
-            <AlertTriangle size={15} className="shrink-0 mt-0.5" />
-            <span>
-              Cross-validated R² bahut kam hai ({((bestAlgorithm?.r2Score ?? 0) * 100).toFixed(1)}%). Iska matlab
-              in features se <b>{targetKey}</b> ko bharosemand tareeke se predict nahi kiya ja sakta.
-            </span>
-          </div>
-        )}
-
-        {/* Warning if all models return the exact same value */}
-        {allModelsIdentical && (
-          <div className="flex items-start gap-2 p-3 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800">
-            <AlertTriangle size={15} className="shrink-0 mt-0.5" />
-            <span>
-              Teeno models ki prediction bilkul same hai. Ye normal nahi hai. Sliders ko dataset average se
-              door karke dekho. Agar phir bhi same rahe, to <b>computeAlgorithmPredictions</b> (utils/dataAnalysis.ts)
-              mein models alag logic se predict nahi kar rahe.
-            </span>
-          </div>
-        )}
 
         <div className="h-80 w-full pt-2">
           {graphType === 'comparison' ? (
@@ -628,14 +581,14 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
           {/* FIX 5: honest summary text */}
           <p className="text-xs text-slate-600 leading-relaxed">
             {predictionLoading ? (
-              <>Prediction calculate ho rahi hai...</>
+              <>Calculating prediction...</>
             ) : !hasPrediction ? (
-              <>Prediction abhi run nahi hui. "Recalculate Models" button dabayein.</>
+              <>No prediction has been run yet. Click "Recalculate Models".</>
             ) : isAtBaseline ? (
               <>
-                Current scenario inputs dataset average ke barabar hain, isliye forecast{' '}
-                <b>{formatNumber(consensusVal)}</b> historical baseline ({formatNumber(targetAverage)}) ke
-                barabar hai. Forecast ko shift hote dekhne ke liye neeche sliders badlein.
+                Current scenario inputs equal the dataset averages, so the forecast{' '}
+                <b>{formatNumber(consensusVal)}</b> matches the historical baseline ({formatNumber(targetAverage)}).
+                Adjust the sliders below to see the forecast shift.
               </>
             ) : (
               <>
