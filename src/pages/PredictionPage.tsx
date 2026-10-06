@@ -13,8 +13,8 @@ import {
   Cpu,
   Layers,
   Check,
-  TrendingUp,
-  Sliders
+  Sliders,
+  AlertTriangle
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -41,7 +41,8 @@ import {
 import {
   formatNumber,
   computeAlgorithmPredictions,
-  generatePredictionCurve
+  generatePredictionCurve,
+  isLikelyIdentifierColumn
 } from '../utils/dataAnalysis';
 
 interface PredictionPageProps {
@@ -89,18 +90,11 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
   const [graphType, setGraphType] = useState<'comparison' | 'curve'>('comparison');
   const [zoomLevel, setZoomLevel] = useState<number>(100);
   const [selectedAlgoId, setSelectedAlgoId] = useState<string | null>(null);
-
-  // Algorithmic working details collapsible state ("show less" by default, expandable)
   const [isWorkingDetailsOpen, setIsWorkingDetailsOpen] = useState<boolean>(false);
-
-  // Scenario input mode: 'sliders' or 'inputs'
   const [scenarioMode, setScenarioMode] = useState<'sliders' | 'inputs'>('sliders');
-
-  // Feature Importance collapsible state: show first 6 by default, expandable if user wishes
   const [showAllFeatures, setShowAllFeatures] = useState<boolean>(false);
 
-  // Full reset: whenever the parent's "Reset Scenarios" button fires (resetSignal changes),
-  // also clear any locally-held UI selection so the page returns to a truly clean state.
+  // Full reset when parent's "Reset Scenarios" fires
   React.useEffect(() => {
     if (resetSignal === undefined) return;
     setSelectedAlgoId(null);
@@ -108,12 +102,24 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
     setZoomLevel(100);
   }, [resetSignal]);
 
+  // FIX 1: Auto-run prediction when page opens / target changes and no result exists yet.
+  // Pehle prediction run nahi hoti thi, to baseVal = targetAverage ban jata tha.
+  React.useEffect(() => {
+    if (!predictionResult && !predictionLoading) {
+      onRunPrediction();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetKey]);
+
   const availableFeatures = nums.filter((n) => n !== targetKey);
 
-  // Derive base prediction value
-  const baseVal = predictionResult ? predictionResult.value : targetAverage;
+  // Whether a real prediction exists
+  const hasPrediction = !!predictionResult;
 
-  // Feature averages for model calculators
+  // Base value passed into the models (falls back to average only if no prediction yet)
+  const baseVal = predictionResult?.value ?? targetAverage;
+
+  // Feature averages
   const featureAverages = useMemo(() => {
     const map: Record<string, number> = {};
     availableFeatures.forEach((col) => {
@@ -123,7 +129,25 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
     return map;
   }, [rows, availableFeatures]);
 
-  // Compute multi-algorithm predictions
+  // Real min/max per feature (for sensible slider ranges and steps)
+  const featureRanges = useMemo(() => {
+    const map: Record<string, { min: number; max: number }> = {};
+    availableFeatures.forEach((col) => {
+      const vals = rows.map((r) => Number(r[col])).filter(Number.isFinite);
+      map[col] = vals.length
+        ? { min: Math.min(...vals), max: Math.max(...vals) }
+        : { min: 0, max: 100 };
+    });
+    return map;
+  }, [rows, availableFeatures]);
+
+  // Target like Pin code / ID is a label, not a quantity: forecasting it is meaningless
+  const targetIsIdentifier = useMemo(
+    () => isLikelyIdentifierColumn(targetKey, rows),
+    [targetKey, rows]
+  );
+
+  // Multi-algorithm predictions
   const algorithmModels = useMemo(() => {
     return computeAlgorithmPredictions(
       rows,
@@ -135,12 +159,36 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
     );
   }, [rows, targetKey, factors, predictionInputs, featureAverages, baseVal]);
 
-  // Determine which of the 3 algorithms is the best decision-making fit for this dataset,
-  // based on the highest R² score (goodness of fit) among the computed models.
+  // FIX 2: Real consensus = average of all model predictions (not just baseVal)
+  const consensusVal = useMemo(() => {
+    if (!algorithmModels.length) return baseVal;
+    return (
+      algorithmModels.reduce((acc, m) => acc + m.predictedValue, 0) / algorithmModels.length
+    );
+  }, [algorithmModels, baseVal]);
+
+  // FIX 3: Detect when consensus equals the baseline (inputs at averages)
+  const tolerance = Math.max(1e-6, Math.abs(targetAverage) * 1e-9);
+  const isAtBaseline = Math.abs(consensusVal - targetAverage) <= tolerance;
+
+  // FIX 4: Detect the suspicious case where all models output exactly the same number
+  const allModelsIdentical = useMemo(() => {
+    if (algorithmModels.length < 2) return false;
+    const first = algorithmModels[0].predictedValue;
+    return algorithmModels.every((m) => Math.abs(m.predictedValue - first) <= 1e-6);
+  }, [algorithmModels]);
+
+  // Best algorithm by R²
   const bestAlgorithm = useMemo(() => {
     if (!algorithmModels.length) return null;
-    return algorithmModels.reduce((best, m) => (m.r2Score > best.r2Score ? m : best), algorithmModels[0]);
+    return algorithmModels.reduce(
+      (best, m) => (m.r2Score > best.r2Score ? m : best),
+      algorithmModels[0]
+    );
   }, [algorithmModels]);
+
+  const weakFit = !!bestAlgorithm && bestAlgorithm.r2Score < 0.3;
+
   const predictionCurveData = useMemo(() => {
     return generatePredictionCurve(algorithmModels, targetAverage, targetStd);
   }, [algorithmModels, targetAverage, targetStd]);
@@ -164,7 +212,7 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
     }));
   }, [algorithmModels, targetAverage]);
 
-  // Dynamic Y-axis domain based on zoom level
+  // Dynamic Y-axis domain
   const yDomain = useMemo(() => {
     const values = algorithmModels.map((m) => m.predictedValue).concat([targetAverage]);
     const minVal = Math.min(...values);
@@ -190,7 +238,7 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
       ? 'Medium'
       : 'Low');
 
-  // Slice feature importance items: first 6 records or all if expanded
+  // Feature importance slicing
   const visibleShapItems = showAllFeatures
     ? shapItems
     : shapItems.slice(0, INITIAL_FEATURE_LIMIT);
@@ -254,7 +302,7 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
         </div>
       </div>
 
-      {/* 2. FIRST: ALGORITHM PREDICTION GRAPHS (With Zoom Controls) */}
+      {/* 2. ALGORITHM PREDICTION GRAPHS */}
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-4">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-100 pb-4">
           <div>
@@ -272,7 +320,6 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
             </p>
           </div>
 
-          {/* Graph Switcher + Zoom Controls */}
           <div className="flex items-center gap-2 flex-wrap">
             <div className="flex items-center bg-slate-50 p-0.5 rounded-lg border border-slate-200 text-xs">
               <button
@@ -299,7 +346,6 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
               </button>
             </div>
 
-            {/* ZOOM TOOLBAR */}
             <div className="flex items-center gap-1 bg-slate-50 p-1 rounded-lg border border-slate-200">
               <span className="text-[12px] font-mono text-slate-500 px-1 font-semibold">
                 Zoom: {zoomLevel}%
@@ -332,7 +378,38 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
           </div>
         </div>
 
-        {/* Graph Display Area */}
+        {targetIsIdentifier && (
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900">
+            <AlertTriangle size={15} className="shrink-0 mt-0.5" />
+            <span>
+              <b>{targetKey}</b> ek ID / label column lagta hai (jaise Pin code), quantity nahi. Isko forecast
+              karna meaningless hai. Upar dropdown se koi asli numeric target chuno (jaise Sales, Amount, Profit).
+            </span>
+          </div>
+        )}
+
+        {weakFit && !targetIsIdentifier && (
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900">
+            <AlertTriangle size={15} className="shrink-0 mt-0.5" />
+            <span>
+              Cross-validated R² bahut kam hai ({((bestAlgorithm?.r2Score ?? 0) * 100).toFixed(1)}%). Iska matlab
+              in features se <b>{targetKey}</b> ko bharosemand tareeke se predict nahi kiya ja sakta.
+            </span>
+          </div>
+        )}
+
+        {/* Warning if all models return the exact same value */}
+        {allModelsIdentical && (
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800">
+            <AlertTriangle size={15} className="shrink-0 mt-0.5" />
+            <span>
+              Teeno models ki prediction bilkul same hai. Ye normal nahi hai. Sliders ko dataset average se
+              door karke dekho. Agar phir bhi same rahe, to <b>computeAlgorithmPredictions</b> (utils/dataAnalysis.ts)
+              mein models alag logic se predict nahi kar rahe.
+            </span>
+          </div>
+        )}
+
         <div className="h-80 w-full pt-2">
           {graphType === 'comparison' ? (
             <ResponsiveContainer width="100%" height="100%">
@@ -499,7 +576,7 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
         </div>
       </div>
 
-      {/* 3. NEXT: ALGORITHM WORKING FOR THAT OUTPUT (Shown in "less" summary with collapsible for more) */}
+      {/* 3. ALGORITHM WORKING */}
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
           <div>
@@ -527,12 +604,13 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
           </button>
         </div>
 
-        {/* Compact ("less") summary view */}
+        {/* Compact summary */}
         <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/70 space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
               <Check size={14} className="text-emerald-600" />
-              Consensus Prediction: <span className="text-indigo-700 font-mono text-sm">{formatNumber(baseVal)}</span>
+              Consensus Prediction:{' '}
+              <span className="text-indigo-700 font-mono text-sm">{formatNumber(consensusVal)}</span>
             </span>
             <span
               className={`text-xs font-bold px-2.5 py-0.5 rounded-full ${
@@ -547,14 +625,30 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
             </span>
           </div>
 
+          {/* FIX 5: honest summary text */}
           <p className="text-xs text-slate-600 leading-relaxed">
-            The machine learning engine evaluated historical correlations across {factors.length} predictors.
-            Key driving features pushed the baseline average of {formatNumber(targetAverage)} to a projected outcome of{' '}
-            <b>{formatNumber(baseVal)}</b> ({baseVal >= targetAverage ? 'above' : 'below'} historical benchmark).
+            {predictionLoading ? (
+              <>Prediction calculate ho rahi hai...</>
+            ) : !hasPrediction ? (
+              <>Prediction abhi run nahi hui. "Recalculate Models" button dabayein.</>
+            ) : isAtBaseline ? (
+              <>
+                Current scenario inputs dataset average ke barabar hain, isliye forecast{' '}
+                <b>{formatNumber(consensusVal)}</b> historical baseline ({formatNumber(targetAverage)}) ke
+                barabar hai. Forecast ko shift hote dekhne ke liye neeche sliders badlein.
+              </>
+            ) : (
+              <>
+                The machine learning engine evaluated historical correlations across {factors.length} predictors.
+                Key driving features moved the baseline average of {formatNumber(targetAverage)} to a projected
+                outcome of <b>{formatNumber(consensusVal)}</b> (
+                {consensusVal > targetAverage ? 'above' : 'below'} historical benchmark).
+              </>
+            )}
           </p>
         </div>
 
-        {/* Collapsible ("more") working details */}
+        {/* Detailed mechanics */}
         {isWorkingDetailsOpen && (
           <div className="space-y-3 pt-2 animate-fadeIn border-t border-slate-100">
             <h5 className="text-xs font-bold text-slate-800 uppercase tracking-wide">
@@ -610,17 +704,20 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
             <div className="p-3 rounded-lg bg-indigo-50/50 border border-indigo-100 text-xs text-indigo-900 space-y-1">
               <span className="font-bold">Model Confidence &amp; Convergence:</span>
               <p className="text-[12px] text-indigo-800 leading-relaxed">
-                Convergence reached with an average R² of {(
-                  algorithmModels.reduce((acc, m) => acc + m.r2Score, 0) /
-                  algorithmModels.length * 100
-                ).toFixed(1)}%. Ensemble weighting combines independent tree splits with regularized linear boundaries to safeguard against extreme outliers.
+                Convergence reached with an average R² of{' '}
+                {(
+                  (algorithmModels.reduce((acc, m) => acc + m.r2Score, 0) /
+                    Math.max(1, algorithmModels.length)) *
+                  100
+                ).toFixed(1)}
+                %. Ensemble weighting combines independent tree splits with regularized linear boundaries to safeguard against extreme outliers.
               </p>
             </div>
           </div>
         )}
       </div>
 
-      {/* 4. NEXT: ADJUST SCENARIOS SECTION (Sliders/inputs to change values & immediately observe outcomes) */}
+      {/* 4. ADJUST SCENARIOS */}
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
           <div>
@@ -682,7 +779,7 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
               Simulated Forecast for {targetKey}
             </span>
             <div className="text-3xl font-black font-mono text-slate-900 mt-0.5">
-              {formatNumber(baseVal)}
+              {formatNumber(consensusVal)}
             </div>
             <span className="text-xs text-slate-500">
               Historical baseline: <b>{formatNumber(targetAverage)}</b>
@@ -696,11 +793,11 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
               </span>
               <span
                 className={`font-mono font-bold text-sm ${
-                  baseVal >= targetAverage ? 'text-emerald-600' : 'text-rose-600'
+                  consensusVal >= targetAverage ? 'text-emerald-600' : 'text-rose-600'
                 }`}
               >
-                {baseVal >= targetAverage ? '+' : ''}
-                {formatNumber(baseVal - targetAverage)}
+                {consensusVal >= targetAverage ? '+' : ''}
+                {formatNumber(consensusVal - targetAverage)}
               </span>
             </div>
 
@@ -722,8 +819,11 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
             {availableFeatures.map((col) => {
               const val = predictionInputs[col] ?? 0;
               const avg = featureAverages[col] ?? 0;
-              const min = Math.min(0, Math.floor(avg * 1.5));
-              const max = Math.max(100, Math.round(avg * 2.5));
+              const rng = featureRanges[col] ?? { min: 0, max: 100 };
+              const span = rng.max - rng.min || 1;
+              const min = rng.min - span * 0.25;
+              const max = rng.max + span * 0.25;
+              const step = span / 200;
 
               return (
                 <div
@@ -742,13 +842,13 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
                     type="range"
                     min={min}
                     max={max}
-                    step={1}
+                    step={step}
                     value={val}
                     onChange={(e) => onInputChange(col, Number(e.target.value) || 0)}
                     className="w-full accent-indigo-600 cursor-pointer"
                   />
                   <div className="flex justify-between text-[11px] text-slate-400 font-mono">
-                    <span>{min}</span>
+                    <span>{formatNumber(min)}</span>
                     <span>Avg: {formatNumber(avg)}</span>
                     <span>{formatNumber(max)}</span>
                   </div>
@@ -791,7 +891,7 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
         )}
       </div>
 
-      {/* 5. NEXT: FEATURE IMPORTANCE (First 6 records shown, then collapsible for more!) */}
+      {/* 5. FEATURE IMPORTANCE */}
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
           <div>
@@ -821,7 +921,6 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
           )}
         </div>
 
-        {/* Feature Importance List */}
         <div className="space-y-2">
           {visibleShapItems.map((item, idx) => {
             const isPositive = item.shapValue >= 0;
@@ -885,7 +984,6 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
           })}
         </div>
 
-        {/* Bottom Expand / Collapse Toggle if length > 6 */}
         {shapItems.length > INITIAL_FEATURE_LIMIT && (
           <div className="flex justify-center pt-2">
             <button
@@ -912,7 +1010,7 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
       {/* 6. BOTTOM NAVIGATION */}
       <div className="flex items-center justify-between pt-2 border-t border-slate-200">
         <span className="text-xs text-slate-500">
-          Target forecasted at <b>{formatNumber(baseVal)}</b> ({risk} variance)
+          Target forecasted at <b>{formatNumber(consensusVal)}</b> ({risk} variance)
         </span>
         <button
           type="button"
