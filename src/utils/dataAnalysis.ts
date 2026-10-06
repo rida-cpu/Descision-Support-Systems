@@ -130,6 +130,20 @@ export function calculateCorrelation(
   return Number.isFinite(r) ? Math.max(-1, Math.min(1, r)) : 0;
 }
 
+/**
+ * Detects columns that are identifiers/labels stored as numbers (pin code, zip, id, phone...)
+ * or are almost constant relative to their size. Forecasting these is meaningless.
+ */
+export function isLikelyIdentifierColumn(name: string, rows: DatasetRow[]): boolean {
+  const byName =
+    /(^|[^a-z])(pin|pincode|zip|zipcode|postal|id|uuid|phone|mobile|serial|index)([^a-z]|$)/i.test(name) ||
+    /pin\s*code|zip\s*code|postal/i.test(name);
+  if (byName) return true;
+  const avg = calculateAverage(rows, name);
+  const std = calculateStd(rows, name);
+  return Math.abs(avg) > 1000 && std / Math.abs(avg) < 0.001;
+}
+
 export function computeColumnProfiles(
   rows: DatasetRow[],
   numericCols: string[]
@@ -216,67 +230,377 @@ export function buildShapContributions(
   });
 }
 
+/* ========================================================================== */
+/*  REAL IN-BROWSER MACHINE LEARNING                                          */
+/*  Ridge Regression, Random Forest, Gradient Boosting — trained on your rows  */
+/*  R² and RMSE come from K-fold cross-validation, not hardcoded numbers.      */
+/* ========================================================================== */
+
+type Predictor = (x: number[]) => number;
+type TreeNode =
+  | { leaf: number }
+  | { feat: number; thr: number; left: TreeNode; right: TreeNode };
+
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function toNum(v: unknown): number | null {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function meanOf(arr: number[]): number {
+  return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+}
+
+function buildTree(
+  X: number[][],
+  y: number[],
+  idx: number[],
+  depth: number,
+  maxDepth: number,
+  minLeaf: number,
+  featCandidates: () => number[]
+): TreeNode {
+  const n = idx.length;
+  let total = 0;
+  for (const i of idx) total += y[i];
+  const mean = n ? total / n : 0;
+  if (depth >= maxDepth || n < minLeaf * 2) return { leaf: mean };
+
+  let bestGain = 1e-12;
+  let bestFeat = -1;
+  let bestThr = 0;
+
+  for (const f of featCandidates()) {
+    const sorted = idx.slice().sort((a, b) => X[a][f] - X[b][f]);
+    let sl = 0;
+    for (let k = 0; k < n - 1; k++) {
+      const i = sorted[k];
+      sl += y[i];
+      const nl = k + 1;
+      const nr = n - nl;
+      if (nl < minLeaf || nr < minLeaf) continue;
+      const xa = X[i][f];
+      const xb = X[sorted[k + 1]][f];
+      if (xa === xb) continue;
+      const sr = total - sl;
+      const gain = (sl * sl) / nl + (sr * sr) / nr - (total * total) / n;
+      if (gain > bestGain) {
+        bestGain = gain;
+        bestFeat = f;
+        bestThr = (xa + xb) / 2;
+      }
+    }
+  }
+
+  if (bestFeat < 0) return { leaf: mean };
+
+  const leftIdx: number[] = [];
+  const rightIdx: number[] = [];
+  for (const i of idx) (X[i][bestFeat] <= bestThr ? leftIdx : rightIdx).push(i);
+
+  return {
+    feat: bestFeat,
+    thr: bestThr,
+    left: buildTree(X, y, leftIdx, depth + 1, maxDepth, minLeaf, featCandidates),
+    right: buildTree(X, y, rightIdx, depth + 1, maxDepth, minLeaf, featCandidates)
+  };
+}
+
+function predictTree(node: TreeNode, x: number[]): number {
+  let cur = node;
+  while (!('leaf' in cur)) {
+    cur = x[cur.feat] <= cur.thr ? cur.left : cur.right;
+  }
+  return cur.leaf;
+}
+
+function solveLinear(A: number[][], b: number[]): number[] {
+  const n = b.length;
+  const M = A.map((row, i) => [...row, b[i]]);
+  for (let col = 0; col < n; col++) {
+    let piv = col;
+    for (let r = col + 1; r < n; r++) {
+      if (Math.abs(M[r][col]) > Math.abs(M[piv][col])) piv = r;
+    }
+    if (Math.abs(M[piv][col]) < 1e-12) continue;
+    [M[col], M[piv]] = [M[piv], M[col]];
+    for (let r = 0; r < n; r++) {
+      if (r === col) continue;
+      const factor = M[r][col] / M[col][col];
+      for (let c = col; c <= n; c++) M[r][c] -= factor * M[col][c];
+    }
+  }
+  return M.map((row, i) => (Math.abs(row[i]) < 1e-12 ? 0 : row[n] / row[i]));
+}
+
+function fitRidge(X: number[][], y: number[], lambda = 1): Predictor {
+  const n = X.length;
+  const p = X[0].length;
+  const mu = new Array(p).fill(0);
+  const sd = new Array(p).fill(1);
+  for (let j = 0; j < p; j++) {
+    mu[j] = meanOf(X.map((r) => r[j]));
+    const v = X.reduce((a, r) => a + (r[j] - mu[j]) ** 2, 0) / Math.max(1, n - 1);
+    sd[j] = Math.sqrt(v) || 1;
+  }
+  const ym = meanOf(y);
+  const Z = X.map((r) => r.map((v, j) => (v - mu[j]) / sd[j]));
+  const A: number[][] = Array.from({ length: p }, () => new Array(p).fill(0));
+  const b = new Array(p).fill(0);
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < p; j++) {
+      b[j] += Z[i][j] * (y[i] - ym);
+      for (let k = 0; k < p; k++) A[j][k] += Z[i][j] * Z[i][k];
+    }
+  }
+  for (let j = 0; j < p; j++) A[j][j] += lambda;
+  const w = solveLinear(A, b);
+  return (x) => {
+    let out = ym;
+    for (let j = 0; j < p; j++) out += w[j] * ((x[j] - mu[j]) / sd[j]);
+    return out;
+  };
+}
+
+function fitForest(X: number[][], y: number[], seed: number): Predictor {
+  const rng = mulberry32(seed);
+  const n = X.length;
+  const p = X[0].length;
+  const mtry = Math.max(1, Math.ceil(p / 2));
+  const ym = meanOf(y);
+  const yc = y.map((v) => v - ym);
+  const trees: TreeNode[] = [];
+
+  const pick = () => {
+    const all = Array.from({ length: p }, (_, i) => i);
+    for (let i = p - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      [all[i], all[j]] = [all[j], all[i]];
+    }
+    return all.slice(0, mtry);
+  };
+
+  for (let t = 0; t < 40; t++) {
+    const boot = Array.from({ length: n }, () => Math.floor(rng() * n));
+    trees.push(buildTree(X, yc, boot, 0, 6, 3, pick));
+  }
+  return (x) => ym + meanOf(trees.map((tr) => predictTree(tr, x)));
+}
+
+function fitBoost(X: number[][], y: number[]): Predictor {
+  const n = X.length;
+  const p = X[0].length;
+  const ym = meanOf(y);
+  const resid = y.map((v) => v - ym);
+  const allFeats = Array.from({ length: p }, (_, i) => i);
+  const allIdx = Array.from({ length: n }, (_, i) => i);
+  const lr = 0.1;
+  const trees: TreeNode[] = [];
+
+  for (let m = 0; m < 80; m++) {
+    const tree = buildTree(X, resid, allIdx, 0, 3, 4, () => allFeats);
+    trees.push(tree);
+    for (let i = 0; i < n; i++) resid[i] -= lr * predictTree(tree, X[i]);
+  }
+  return (x) => {
+    let out = ym;
+    for (const tr of trees) out += lr * predictTree(tr, x);
+    return out;
+  };
+}
+
+type Fitter = (X: number[][], y: number[]) => Predictor;
+
+function crossValidate(fit: Fitter, X: number[][], y: number[], folds: number) {
+  const n = y.length;
+  const rng = mulberry32(42);
+  const order = Array.from({ length: n }, (_, i) => i);
+  for (let i = n - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  const oof = new Array(n).fill(0);
+  for (let f = 0; f < folds; f++) {
+    const testSet = new Set<number>();
+    for (let k = f; k < n; k += folds) testSet.add(order[k]);
+    const Xtr: number[][] = [];
+    const ytr: number[] = [];
+    for (let i = 0; i < n; i++) {
+      if (!testSet.has(i)) {
+        Xtr.push(X[i]);
+        ytr.push(y[i]);
+      }
+    }
+    const model = fit(Xtr, ytr);
+    testSet.forEach((i) => {
+      oof[i] = model(X[i]);
+    });
+  }
+  const ym = meanOf(y);
+  let sse = 0;
+  let sst = 0;
+  for (let i = 0; i < n; i++) {
+    sse += (y[i] - oof[i]) ** 2;
+    sst += (y[i] - ym) ** 2;
+  }
+  return {
+    r2: sst > 0 ? 1 - sse / sst : 0,
+    rmse: Math.sqrt(sse / n)
+  };
+}
+
+interface TrainedModel {
+  predict: Predictor;
+  r2: number;
+  rmse: number;
+  ms: number;
+}
+type TrainedBundle = Record<'random_forest' | 'gradient_boost' | 'linear_ridge', TrainedModel>;
+
+const modelCache = new WeakMap<DatasetRow[], Map<string, TrainedBundle>>();
+
+function buildTrainingData(rows: DatasetRow[], targetKey: string, features: string[]) {
+  const colMeans = features.map((f) => {
+    let s = 0;
+    let c = 0;
+    for (const r of rows) {
+      const v = toNum(r[f]);
+      if (v !== null) {
+        s += v;
+        c++;
+      }
+    }
+    return c ? s / c : 0;
+  });
+
+  let X: number[][] = [];
+  let y: number[] = [];
+  for (const r of rows) {
+    const t = toNum(r[targetKey]);
+    if (t === null) continue;
+    X.push(
+      features.map((f, j) => {
+        const v = toNum(r[f]);
+        return v === null ? colMeans[j] : v;
+      })
+    );
+    y.push(t);
+  }
+
+  // Keep training fast on very large files
+  const MAX_ROWS = 3000;
+  if (y.length > MAX_ROWS) {
+    const stride = y.length / MAX_ROWS;
+    const X2: number[][] = [];
+    const y2: number[] = [];
+    for (let k = 0; k < MAX_ROWS; k++) {
+      const i = Math.floor(k * stride);
+      X2.push(X[i]);
+      y2.push(y[i]);
+    }
+    X = X2;
+    y = y2;
+  }
+  return { X, y };
+}
+
+function trainBundle(X: number[][], y: number[]): TrainedBundle {
+  const yMean = meanOf(y);
+  const n = y.length;
+  const p = n ? X[0].length : 0;
+
+  if (n < 12 || p === 0) {
+    const flat = (): TrainedModel => ({ predict: () => yMean, r2: 0, rmse: 0, ms: 0 });
+    return { random_forest: flat(), gradient_boost: flat(), linear_ridge: flat() };
+  }
+
+  const folds = n > 2000 ? 3 : 5;
+  const fitters: Record<keyof TrainedBundle, Fitter> = {
+    random_forest: (Xt, yt) => fitForest(Xt, yt, 7),
+    gradient_boost: (Xt, yt) => fitBoost(Xt, yt),
+    linear_ridge: (Xt, yt) => fitRidge(Xt, yt, 1)
+  };
+
+  const out = {} as TrainedBundle;
+  (Object.keys(fitters) as (keyof TrainedBundle)[]).forEach((id) => {
+    const cv = crossValidate(fitters[id], X, y, folds);
+    const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const predict = fitters[id](X, y);
+    const t1 = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    out[id] = { predict, r2: cv.r2, rmse: cv.rmse, ms: t1 - t0 };
+  });
+  return out;
+}
+
+function getBundle(rows: DatasetRow[], targetKey: string, features: string[]): TrainedBundle {
+  let perRows = modelCache.get(rows);
+  if (!perRows) {
+    perRows = new Map();
+    modelCache.set(rows, perRows);
+  }
+  const key = `${targetKey}|${features.join(',')}`;
+  let bundle = perRows.get(key);
+  if (!bundle) {
+    const { X, y } = buildTrainingData(rows, targetKey, features);
+    bundle = trainBundle(X, y);
+    perRows.set(key, bundle);
+  }
+  return bundle;
+}
+
 export function computeAlgorithmPredictions(
   rows: DatasetRow[],
   targetKey: string,
   factors: CorrelationFactor[],
   inputs: Record<string, number>,
   featureAverages: Record<string, number>,
-  baselineVal: number
+  _baselineVal: number
 ): AlgorithmModelPrediction[] {
-  const targetAvg = calculateAverage(rows, targetKey);
-  const targetStd = calculateStd(rows, targetKey) || 1;
+  const features = Array.from(new Set(factors.map((f) => f.name))).filter(
+    (n) => n !== targetKey
+  );
 
-  // Linear Ridge Regression
-  let linearShift = 0;
-  factors.slice(0, 5).forEach((f) => {
-    const val = inputs[f.name] ?? featureAverages[f.name] ?? 0;
-    const avg = featureAverages[f.name] ?? 0;
-    const std = calculateStd(rows, f.name) || 1;
-    const z = (val - avg) / std;
-    linearShift += z * f.correlation * (targetStd * 0.32);
-  });
-  const linearPred = targetAvg + linearShift;
+  const bundle = getBundle(rows, targetKey, features);
 
-  // Random Forest Ensembles (Tree averaging with non-linear dampening)
-  let treeShift = 0;
-  factors.slice(0, 7).forEach((f, idx) => {
-    const val = inputs[f.name] ?? featureAverages[f.name] ?? 0;
-    const avg = featureAverages[f.name] ?? 0;
-    const std = calculateStd(rows, f.name) || 1;
-    const z = (val - avg) / std;
-    // Sub-linear saturation for tree splits
-    const nonLinearZ = Math.sign(z) * Math.pow(Math.abs(z), 0.88);
-    const weight = f.correlation * (1 - idx * 0.08);
-    treeShift += nonLinearZ * weight * (targetStd * 0.36);
+  const x = features.map((n) => {
+    const v = inputs[n];
+    return Number.isFinite(v) ? v : featureAverages[n] ?? 0;
   });
-  const randomForestPred = targetAvg + treeShift;
 
-  // Gradient Boosted Decision Trees (Sequential residual boosting)
-  let boostShift = 0;
-  factors.slice(0, 6).forEach((f) => {
-    const val = inputs[f.name] ?? featureAverages[f.name] ?? 0;
-    const avg = featureAverages[f.name] ?? 0;
-    const std = calculateStd(rows, f.name) || 1;
-    const z = (val - avg) / std;
-    boostShift += (z * f.correlation + 0.12 * Math.sign(z) * Math.min(Math.abs(z), 2)) * (targetStd * 0.34);
-  });
-  const gradientBoostPred = targetAvg + boostShift;
+  const round2 = (v: number) => Math.round(v * 100) / 100;
+  const r3 = (v: number) => Math.round(v * 1000) / 1000;
+  const conf = (r2: number) => Math.round(Math.max(0, Math.min(1, r2)) * 100);
+  const speed = (ms: number) => `${Math.max(1, Math.round(ms))}ms train`;
+
+  const rf = bundle.random_forest;
+  const gb = bundle.gradient_boost;
+  const lr = bundle.linear_ridge;
 
   return [
     {
       id: 'random_forest',
       name: 'Random Forest Regressor',
       shortName: 'Random Forest',
-      type: 'Ensemble of 100 Decision Trees',
-      predictedValue: Math.round(randomForestPred * 100) / 100,
-      r2Score: 0.942,
-      rmse: Math.round(targetStd * 0.22),
-      speed: '< 20ms',
-      confidence: 96,
+      type: 'Ensemble of 40 Decision Trees',
+      predictedValue: round2(rf.predict(x)),
+      r2Score: r3(rf.r2),
+      rmse: round2(rf.rmse),
+      speed: speed(rf.ms),
+      confidence: conf(rf.r2),
       color: '#4f46e5',
       simpleExplanation:
-        'Averages 100 independent decision trees to produce a stable, low-variance estimate.',
+        'Averages 40 independent decision trees to produce a stable, low-variance estimate.',
       bestFor: 'Complex multi-variable interactions with non-linear boundaries.',
       description:
         'Bootstraps multiple decision trees with random feature sub-sampling to avoid overfitting.'
@@ -286,11 +610,11 @@ export function computeAlgorithmPredictions(
       name: 'Gradient Boosting Machine',
       shortName: 'Gradient Boost',
       type: 'Sequential Error-Correcting Trees',
-      predictedValue: Math.round(gradientBoostPred * 100) / 100,
-      r2Score: 0.965,
-      rmse: Math.round(targetStd * 0.18),
-      speed: '< 35ms',
-      confidence: 98,
+      predictedValue: round2(gb.predict(x)),
+      r2Score: r3(gb.r2),
+      rmse: round2(gb.rmse),
+      speed: speed(gb.ms),
+      confidence: conf(gb.r2),
       color: '#059669',
       simpleExplanation:
         'Builds sequential trees where each new tree specifically fixes errors made by earlier trees.',
@@ -303,11 +627,11 @@ export function computeAlgorithmPredictions(
       name: 'Linear Ridge Regression (L2)',
       shortName: 'Linear Ridge',
       type: 'Regularized Parametric Regression',
-      predictedValue: Math.round(linearPred * 100) / 100,
-      r2Score: 0.898,
-      rmse: Math.round(targetStd * 0.31),
-      speed: '< 5ms',
-      confidence: 92,
+      predictedValue: round2(lr.predict(x)),
+      r2Score: r3(lr.r2),
+      rmse: round2(lr.rmse),
+      speed: speed(lr.ms),
+      confidence: conf(lr.r2),
       color: '#0284c7',
       simpleExplanation:
         'Fits a smooth, transparent linear line with penalty weights to prevent extreme values.',
@@ -356,7 +680,6 @@ export function parseCSV(text: string): DatasetRow[] {
   const lines = text.trim().split(/\r?\n/);
   if (lines.length < 2) return [];
 
-  // Parse header
   const headers = splitCsvLine(lines[0]);
   const rows: DatasetRow[] = [];
 
