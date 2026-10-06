@@ -168,7 +168,7 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
   }, [algorithmModels, baseVal]);
 
   // FIX 3: Detect when consensus equals the baseline (inputs at averages)
-  const tolerance = Math.max(1e-6, Math.abs(targetAverage) * 1e-9);
+  const tolerance = Math.max(1e-9, targetStd * 0.01);
   const isAtBaseline = Math.abs(consensusVal - targetAverage) <= tolerance;
 
   // FIX 4: Detect the suspicious case where all models output exactly the same number
@@ -690,7 +690,7 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
               })}
             </div>
 
-            {bestAlgorithm && (
+            {bestAlgorithm && !weakFit && (
               <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1">
                 <span className="font-bold">★ Recommended for This Dataset:</span>{' '}
                 <span className="font-semibold">{bestAlgorithm.name}</span>
